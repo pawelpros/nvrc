@@ -9,6 +9,7 @@ use crate::macros::ResultExt;
 use crate::nvrc::NVRC;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::OnceLock;
 
 /// UVM persistence mode keeps unified memory mappings alive between kernel launches,
 /// avoiding expensive page migrations. Enabled by default for ML workloads.
@@ -26,15 +27,21 @@ fn hostengine_args() -> &'static [&'static str] {
     &["--service-account", "nvidia-dcgm", "--home-dir", "/tmp"]
 }
 
-/// Kubernetes mode disables standalone HTTP server (we're behind kata-agent),
-/// and we use the standard counters config shipped with the container image.
+/// Kubernetes mode disables standalone HTTP server (we're behind kata-agent).
+/// The collectors file ships with the exporter, so it follows the gpu extension.
 fn dcgm_exporter_args() -> &'static [&'static str] {
-    &["-k", "-f", "/etc/dcgm-exporter/default-counters.csv"]
+    static COUNTERS: OnceLock<String> = OnceLock::new();
+    static ARGS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ARGS.get_or_init(|| {
+        let counters = COUNTERS.get_or_init(|| gpu_extension::path(DCGM_EXPORTER_COUNTERS));
+        vec!["-k", "-f", counters.as_str()]
+    })
 }
 
 const FM_CONFIG: &str = "/usr/share/nvidia/nvswitch/fabricmanager.cfg";
 const FM_RUNTIME_CONFIG: &str = "/run/fabricmanager.cfg";
 const NVLSM_CONFIG: &str = "/usr/share/nvidia/nvlsm/nvlsm.conf";
+const DCGM_EXPORTER_COUNTERS: &str = "/etc/dcgm-exporter/default-counters.csv";
 
 /// FABRIC_MODE=0: full GPU passthrough, FM manages NVSwitches directly.
 pub const FABRIC_MODE_FULL: u8 = 0;
@@ -179,11 +186,8 @@ mod tests {
 
     #[test]
     fn test_dcgm_exporter_args() {
-        let args = dcgm_exporter_args();
-        assert_eq!(
-            args,
-            &["-k", "-f", "/etc/dcgm-exporter/default-counters.csv"]
-        );
+        let counters = gpu_extension::path(DCGM_EXPORTER_COUNTERS);
+        assert_eq!(dcgm_exporter_args(), &["-k", "-f", counters.as_str()]);
     }
 
     // === Skip path tests ===

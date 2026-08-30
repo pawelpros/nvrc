@@ -7,10 +7,11 @@
 //! action is configurable via `set_panic_hook_with()`.
 
 use crate::macros::ResultExt;
+use log::debug;
 use nix::sys::reboot::{reboot, RebootMode};
 use nix::unistd::sync;
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::panic;
 
 /// Default shutdown action: power off the VM.
@@ -49,14 +50,24 @@ pub(crate) fn set_panic_hook_with<F: Fn() + Send + Sync + 'static>(shutdown: F) 
 /// that blocks potential kernel-level attacks via malicious modules.
 /// This is a one-way operation: once set, it cannot be undone without reboot.
 pub fn disable_modules_loading() {
-    const PATH: &str = "/proc/sys/kernel/modules_disabled";
-    fs::write(PATH, b"1\n").or_panic(format_args!("disable module loading {PATH}"));
+    disable_modules_loading_at("/proc/sys/kernel/modules_disabled")
+}
+
+fn disable_modules_loading_at(path: &str) {
+    match fs::write(path, b"1\n") {
+        // Absent without CONFIG_MODULES, where nothing can be loaded anyway.
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            debug!("{path} absent, kernel has no module support");
+        }
+        r => r.or_panic(format_args!("disable module loading {path}")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::require_root;
+    use std::panic::catch_unwind;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -72,6 +83,18 @@ mod tests {
         // Verify it was set
         let content = fs::read_to_string("/proc/sys/kernel/modules_disabled").unwrap();
         assert_eq!(content.trim(), "1");
+    }
+
+    #[test]
+    fn test_disable_modules_loading_tolerates_missing_sysctl() {
+        disable_modules_loading_at("/proc/sys/kernel/nvrc-absent/modules_disabled");
+    }
+
+    #[test]
+    fn test_disable_modules_loading_still_panics_on_other_errors() {
+        // A directory is not NotFound, so it must keep the fail-fast behaviour.
+        let result = catch_unwind(|| disable_modules_loading_at("/proc/sys/kernel"));
+        assert!(result.is_err());
     }
 
     #[test]
